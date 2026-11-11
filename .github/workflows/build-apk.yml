@@ -1,0 +1,79 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate the Android project
+        run: |
+          flutter create --platforms=android --project-name weather_fusion --org dev.weatherfusion .
+          # Keep every tracked file exactly as committed.
+          git checkout -- .
+
+      - name: Add permissions and app name
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path("android/app/src/main/AndroidManifest.xml")
+          s = p.read_text()
+          perms = "".join(
+              f'\n    <uses-permission android:name="android.permission.{n}" />'
+              for n in ("INTERNET", "ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION")
+          )
+          s, n = re.subn(r"(<manifest[^>]*>)", r"\1" + perms, s, count=1)
+          assert n == 1, "manifest tag not found"
+          s = s.replace('android:label="weather_fusion"', 'android:label="Weather Fusion"')
+          p.write_text(s)
+          print(s)
+          PY
+
+      - name: Write .env
+        run: |
+          echo "OPENWEATHER_API_KEY=${{ secrets.OPENWEATHER_API_KEY }}" > .env
+          echo "MET_NO_USER_AGENT=WeatherFusion/1.0 github.com/${{ github.repository_owner }}" >> .env
+
+      - run: flutter pub get
+
+      - name: Analyze
+        continue-on-error: true
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Test
+        continue-on-error: true
+        run: flutter test
+
+      - name: Build release APK
+        run: flutter build apk --release --dart-define-from-file=.env
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: weather-fusion-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Publish as a release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          files: build/app/outputs/flutter-apk/app-release.apk
